@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "erret-macro",
+    "erret-result",
+    "tests",
+]
+resolver = "3"
