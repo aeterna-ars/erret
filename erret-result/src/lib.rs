@@ -1,13 +1,14 @@
-use std::fmt;
+use core::fmt;
+use core::error::Error;
 
 pub struct ErrRet {
-    inner: Box<dyn std::error::Error + Send + Sync + 'static>,
+    inner: Box<dyn Error + Send + Sync + 'static>,
 }
 
 impl ErrRet {
     pub fn new<E>(err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         ErrRet { inner: Box::new(err) }
     }
@@ -27,11 +28,11 @@ impl fmt::Debug for ErrRet {
 
 impl<E> From<E> for ErrRet
 where
-    E: std::error::Error + Send + Sync + 'static,
+    E: Error + Send + Sync + 'static,
 {
     fn from(err: E) -> Self {
         ErrRet::new(err)
     }
 }
 
-pub type ErrResult<T, E = ErrRet> = std::result::Result<T, E>;
+pub type ErrResult<T, E = ErrRet> = core::result::Result<T, E>;

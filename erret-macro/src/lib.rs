@@ -1,18 +1,18 @@
-mod parse;
-mod codegen;
-
 extern crate proc_macro;
+
+mod codegen;
+mod parse;
 
 use proc_macro::*;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Enum {
-    is_pub: bool,
-    name: String,
-    vars: Vec<Var>,
+    pub name: String,
+    pub has_generics: bool,
+    pub vars: Vec<Var>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Var {
     pub name: String,
     pub fields: Vec<FieldInfo>,
@@ -29,39 +29,30 @@ struct FieldInfo {
 #[proc_macro_derive(Error, attributes(error, from))]
 pub fn error(item: TokenStream) -> TokenStream {
     let mut iter = item.into_iter().peekable();
-
-    let error = parse_enum(&mut iter);
-
-    codegen::generate_code(error)
+    let en = parse_enum(&mut iter);
+    codegen::generate_code(en)
 }
 
 fn parse_enum(iter: &mut std::iter::Peekable<token_stream::IntoIter>) -> Enum {
-    let mut perechislenie = Enum {
-        is_pub: false,
-        name: String::new(),
-        vars: Vec::new(),
-    };
-
+    let mut en = Enum::default();
     while let Some(token) = iter.next() {
         match token {
             TokenTree::Ident(i) => {
-                let name = i.to_string();
-                if name == "pub" {
-                    perechislenie.is_pub = true;
-                }
-                if name == "enum" {
-                    if let Some(TokenTree::Ident(name_ident)) = iter.next() {
-                        perechislenie.name = name_ident.to_string();
+                if i.to_string() == "enum" {
+                    if let Some(TokenTree::Ident(n)) = iter.next() {
+                        en.name = n.to_string();
                     }
                 }
             }
+            TokenTree::Punct(p) if p.as_char() == '<' => {
+                en.has_generics = true;
+            }
             TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => {
-                perechislenie.vars = parse::parse_enum_body(g.stream());
+                en.vars = parse::parse_enum_body(g.stream());
                 break;
             }
             _ => {}
         }
     }
-
-    perechislenie
+    en
 }

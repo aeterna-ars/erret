@@ -1,128 +1,219 @@
+use crate::{FieldInfo, Var};
 use proc_macro::*;
-
-use crate::{Var, FieldInfo};
 
 pub fn parse_enum_body(stream: TokenStream) -> Vec<Var> {
     let mut iter = stream.into_iter().peekable();
-    let mut parsed_vars = Vec::new();
+    let mut vars = Vec::new();
 
-    let mut current_var = Var::default();
-    let mut variant_has_from = false;
+    while iter.peek().is_some() {
+        let mut variant_has_from = false;
+        let mut error_arg: Option<String> = None;
 
-    while let Some(token) = iter.next() {
-        match token {
-            TokenTree::Punct(p) if p.as_char() == '#' => {
-                if let Some(TokenTree::Group(g)) = iter.next() {
-                    if g.delimiter() == Delimiter::Bracket {
-                        if let Some(TokenTree::Ident(id)) = g.stream().into_iter().next() {
-                            match id.to_string().as_str() {
-                                "from" => variant_has_from = true,
-                                "error" => parse_attrs(g, &mut current_var),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-
-            TokenTree::Ident(ident) => {
-                current_var.name = ident.to_string();
-
-                if let Some(TokenTree::Group(g)) = iter.peek() {
-                    match g.delimiter() {
-                        Delimiter::Parenthesis => {
-                            let fields_stream = g.stream().to_string();
-                            for ty in fields_stream.split(',') {
-                                let clean_ty = ty.trim().to_string();
-                                if !clean_ty.is_empty() {
-                                    current_var.fields.push(FieldInfo {
-                                        name: None,
-                                        ty: clean_ty,
-                                        has_from: variant_has_from,
-                                    });
-                                    variant_has_from = false;
-                                }
-                            }
-                            iter.next();
-                        }
-                        Delimiter::Brace => {
-                            let mut fields_iter = g.stream().into_iter().peekable();
-                            let mut field_has_from = false;
-
-                            while let Some(f_token) = fields_iter.next() {
-                                match f_token {
-                                    TokenTree::Punct(ref p) if p.as_char() == '#' => {
-                                        if let Some(TokenTree::Group(attr_g)) = fields_iter.next() {
-                                            if attr_g.delimiter() == Delimiter::Bracket {
-                                                if let Some(TokenTree::Ident(id)) = attr_g.stream().into_iter().next() {
-                                                    if id.to_string() == "from" {
-                                                        field_has_from = true;
-                                                    }
+        loop {
+            match iter.peek() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '#' => {
+                    iter.next();
+                    if let Some(TokenTree::Group(g)) = iter.next() {
+                        if g.delimiter() == Delimiter::Bracket {
+                            let mut inner = g.stream().into_iter();
+                            if let Some(TokenTree::Ident(id)) = inner.next() {
+                                match id.to_string().as_str() {
+                                    "from" => variant_has_from = true,
+                                    "error" => {
+                                        if let Some(TokenTree::Group(args)) = inner.next() {
+                                            if args.delimiter() == Delimiter::Parenthesis {
+                                                if let Some(TokenTree::Literal(lit)) =
+                                                    args.stream().into_iter().next()
+                                                {
+                                                    let s = lit.to_string();
+                                                    error_arg =
+                                                        Some(s.trim_matches('"').to_string());
                                                 }
-                                            }
-                                        }
-                                    }
-                                    TokenTree::Ident(f_ident) => {
-                                        let f_name = f_ident.to_string();
-                                        if let Some(TokenTree::Punct(p)) = fields_iter.next() {
-                                            if p.as_char() == ':' {
-                                                let mut ty_str = String::new();
-                                                while let Some(next_t) = fields_iter.peek() {
-                                                    if let TokenTree::Punct(punct) = next_t {
-                                                        if punct.as_char() == ',' {
-                                                            fields_iter.next();
-                                                            break;
-                                                        }
-                                                    }
-                                                    ty_str.push_str(&fields_iter.next().unwrap().to_string());
-                                                }
-                                                current_var.fields.push(FieldInfo {
-                                                    name: Some(f_name.clone()),
-                                                    ty: ty_str.trim().to_string(),
-                                                    has_from: field_has_from,
-                                                });
-                                                field_has_from = false;
                                             }
                                         }
                                     }
                                     _ => {}
                                 }
                             }
-                            iter.next();
                         }
-                        _ => {}
                     }
                 }
+                _ => break,
+            }
+        }
 
-                parsed_vars.push(std::mem::take(&mut current_var));
-                variant_has_from = false;
+        let name = match iter.next() {
+            Some(TokenTree::Ident(id)) => id.to_string(),
+            Some(_) => continue,
+            None => break,
+        };
 
-                if let Some(TokenTree::Punct(p)) = iter.peek() {
-                    if p.as_char() == ',' {
-                        iter.next();
-                    }
+        let mut fields = Vec::new();
+
+        match iter.peek() {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
+                if let Some(TokenTree::Group(g)) = iter.next() {
+                    fields = parse_tuple_fields(g.stream(), variant_has_from);
+                }
+            }
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                if let Some(TokenTree::Group(g)) = iter.next() {
+                    fields = parse_named_fields(g.stream(), variant_has_from);
                 }
             }
             _ => {}
         }
+
+        vars.push(Var {
+            name,
+            fields,
+            error_arg,
+        });
+
+        if let Some(TokenTree::Punct(p)) = iter.peek() {
+            if p.as_char() == ',' {
+                iter.next();
+            }
+        }
     }
 
-    parsed_vars
+    vars
 }
 
-pub fn parse_attrs(group: Group, var: &mut Var) {
-    if group.delimiter() == Delimiter::Bracket {
-        let mut inner_iter = group.stream().into_iter();
-        if let Some(TokenTree::Ident(i)) = inner_iter.next() {
-            if i.to_string() == "error" {
-                if let Some(TokenTree::Group(args_g)) = inner_iter.next() {
-                    if args_g.delimiter() == Delimiter::Parenthesis {
-                        if let Some(TokenTree::Literal(lit)) = args_g.stream().into_iter().next() {
-                            var.error_arg = Some(lit.to_string().trim_matches('"').to_string());
+fn parse_tuple_fields(stream: TokenStream, variant_has_from: bool) -> Vec<FieldInfo> {
+    let mut result = Vec::new();
+    let mut current: Vec<TokenTree> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut field_has_from = variant_has_from;
+    let mut iter = stream.into_iter().peekable();
+
+    while let Some(t) = iter.next() {
+        match &t {
+            TokenTree::Punct(p) if p.as_char() == '#' => {
+                if let Some(TokenTree::Group(g)) = iter.next() {
+                    if g.delimiter() == Delimiter::Bracket {
+                        if let Some(TokenTree::Ident(id)) = g.stream().into_iter().next() {
+                            if id.to_string() == "from" {
+                                field_has_from = true;
+                            }
                         }
                     }
                 }
             }
+            TokenTree::Punct(p) => {
+                let c = p.as_char();
+                match c {
+                    '<' | '(' | '[' => {
+                        depth += 1;
+                        current.push(t.clone());
+                    }
+                    '>' | ')' | ']' => {
+                        depth -= 1;
+                        current.push(t.clone());
+                    }
+                    ',' if depth == 0 => {
+                        flush_field(&mut result, &mut current, &mut field_has_from);
+                    }
+                    _ => current.push(t.clone()),
+                }
+            }
+            _ => current.push(t.clone()),
         }
     }
+    flush_field(&mut result, &mut current, &mut field_has_from);
+    result
+}
+
+fn flush_field(result: &mut Vec<FieldInfo>, current: &mut Vec<TokenTree>, has_from: &mut bool) {
+    if current.is_empty() {
+        *has_from = false;
+        return;
+    }
+    let tokens: TokenStream = current.drain(..).collect();
+    let ty = tokens.to_string().trim().to_string();
+    if !ty.is_empty() {
+        result.push(FieldInfo {
+            name: None,
+            ty,
+            has_from: *has_from,
+        });
+    }
+    *has_from = false;
+}
+
+fn parse_named_fields(stream: TokenStream, variant_has_from: bool) -> Vec<FieldInfo> {
+    let mut result = Vec::new();
+    let mut iter = stream.into_iter().peekable();
+    let mut field_has_from = variant_has_from;
+
+    loop {
+        loop {
+            match iter.peek() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '#' => {
+                    iter.next();
+                    if let Some(TokenTree::Group(g)) = iter.next() {
+                        if g.delimiter() == Delimiter::Bracket {
+                            if let Some(TokenTree::Ident(id)) = g.stream().into_iter().next() {
+                                if id.to_string() == "from" {
+                                    field_has_from = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        let name = match iter.next() {
+            Some(TokenTree::Ident(id)) => id.to_string(),
+            Some(_) => continue,
+            None => break,
+        };
+
+        match iter.next() {
+            Some(TokenTree::Punct(p)) if p.as_char() == ':' => {}
+            _ => break,
+        }
+
+        let mut ty_tokens: Vec<TokenTree> = Vec::new();
+        let mut depth: i32 = 0;
+        while let Some(t) = iter.next() {
+            match &t {
+                TokenTree::Punct(p) => {
+                    let c = p.as_char();
+                    match c {
+                        '<' | '(' | '[' => {
+                            depth += 1;
+                            ty_tokens.push(t);
+                        }
+                        '>' | ')' | ']' => {
+                            depth -= 1;
+                            ty_tokens.push(t);
+                        }
+                        ',' if depth == 0 => break,
+                        _ => ty_tokens.push(t),
+                    }
+                }
+                _ => ty_tokens.push(t),
+            }
+        }
+
+        let tokens: TokenStream = ty_tokens.into_iter().collect();
+        let ty = tokens.to_string().trim().to_string();
+        if !ty.is_empty() {
+            result.push(FieldInfo {
+                name: Some(name),
+                ty,
+                has_from: field_has_from,
+            });
+        }
+        field_has_from = false;
+
+        if iter.peek().is_none() {
+            break;
+        }
+    }
+
+    result
 }
