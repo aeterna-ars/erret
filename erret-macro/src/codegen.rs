@@ -47,12 +47,11 @@ pub fn generate_code(perechislenie: Enum) -> TokenStream {
         if let Some(from_field) = var.fields.iter().find(|f| f.has_from) {
             let ty = &from_field.ty;
             if let Some(ref from_field_name) = from_field.name {
-                // Из именованной структуры {}
                 if let Some(static_field) = var.fields.iter().find(|f| !f.has_from) {
                     let static_field_name = static_field.name.as_ref().unwrap();
                     let default_value = &var.name;
                     from_impls.push_str(&format!(
-                        "impl std::convert::From<{ty}> for {enum_name} {{
+                        "impl core::convert::From<{ty}> for {enum_name} {{
                             fn from(err: {ty}) -> Self {{
                                 {enum_name}::{var_name} {{
                                     {static_field_name}: \"{default_value}\",
@@ -68,7 +67,7 @@ pub fn generate_code(perechislenie: Enum) -> TokenStream {
             } else {
                 if var.fields.len() == 1 {
                     from_impls.push_str(&format!(
-                        "impl std::convert::From<{ty}> for {enum_name} {{
+                        "impl core::convert::From<{ty}> for {enum_name} {{
                             fn from(err: {ty}) -> Self {{
                                 {enum_name}::{var_name}(err)
                             }}
@@ -82,14 +81,14 @@ pub fn generate_code(perechislenie: Enum) -> TokenStream {
 
     format!(
         "
-        impl std::fmt::Display for {enum_name} {{
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        impl core::fmt::Display for {enum_name} {{
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{
                 match self {{
                     {display_arms}
                 }}
             }}
         }}
-        impl std::error::Error for {enum_name} {{}}
+        impl core::error::Error for {enum_name} {{}}
         {from_impls}
         ",
         enum_name = enum_name, display_arms = display_arms, from_impls = from_impls
