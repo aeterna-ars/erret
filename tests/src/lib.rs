@@ -1,109 +1,333 @@
+#[allow(dead_code)]
+
 #[cfg(test)]
 mod macro_test {
+    use core::fmt::Debug;
+    use std::error::Error as StdError;
     use std::io::{Error as IoError, ErrorKind};
     use std::net::AddrParseError;
+
     use erret_macro::Error;
 
     #[derive(Debug, Error)]
-    pub enum TestError {
-        Zalupa,
+    pub enum ShapeErr {
+        Bare,
 
-        #[error("Empty err")]
-        Empty,
+        #[error("explicit message")]
+        Message,
 
-        #[error("Iface '{}' not found")]
-        InvalidIface(&'static str),
+        #[error("port={}")]
+        Port(u16),
 
-        #[error("Bad port: {}")]
-        BadPort(u16),
-        
-        #[error("Disk err: {}")]
-        #[from]
-        Io(IoError),
-        
-        #[error("Bad IP: {}")]
-        #[from]
-        BadIp(AddrParseError),
+        #[error("a={} b={}")]
+        Pair(u32, u32),
 
-        #[error("Zaebal, suka, blyat: {}")]
-        ZaebalIo(IoError),
+        #[error("name: {name}")]
+        Named { name: &'static str },
+
+        #[error("x={x} y={y}")]
+        Point { x: i32, y: i32 },
     }
-
-    type Result<T> = std::result::Result<T, TestError>;
 
     #[test]
-    fn test_display_formatting() {
-        let err_zalupa = TestError::Zalupa;
-        assert_eq!(err_zalupa.to_string(), "Zalupa");
-
-        let err_empty = TestError::Empty;
-        assert_eq!(err_empty.to_string(), "Empty err");
-
-        let err_port = TestError::BadPort(80);
-        assert_eq!(err_port.to_string(), "Bad port: 80");
-
-        let err_iface = TestError::InvalidIface("eth0");
-        assert_eq!(err_iface.to_string(), "Iface 'eth0' not found");
-
-        let io_sys = IoError::new(ErrorKind::PermissionDenied, "access denied");
-        let err_io = TestError::Io(io_sys);
-        assert_eq!(err_io.to_string(), "Disk err: access denied");
-
-        let zaebal_sys = IoError::new(ErrorKind::PermissionDenied, "access denied");
-        let err_zaebalio = TestError::ZaebalIo(zaebal_sys);
-        assert_eq!(err_zaebalio.to_string(), "Zaebal, suka, blyat: access denied");
+    fn display_all_shapes() {
+        assert_eq!(ShapeErr::Bare.to_string(), "Bare");
+        assert_eq!(ShapeErr::Message.to_string(), "explicit message");
+        assert_eq!(ShapeErr::Port(8080).to_string(), "port=8080");
+        assert_eq!(ShapeErr::Pair(1, 2).to_string(), "a=1 b=2");
+        assert_eq!(
+            ShapeErr::Named { name: "abc" }.to_string(),
+            "name: abc"
+        );
+        assert_eq!(
+            ShapeErr::Point { x: -5, y: 10 }.to_string(),
+            "x=-5 y=10"
+        );
     }
 
-    fn cause_io_error() -> std::result::Result<(), IoError> {
-        Err(IoError::new(ErrorKind::NotFound, "file not found"))
+    #[derive(Debug, Error)]
+    pub enum FmtErr {
+        #[error("{0:?}")]
+        Debug0(String),
+
+        #[error("{0} vs {1}")]
+        Ordered(&'static str, &'static str),
+
+        #[error("{1} then {0}")]
+        Swapped(&'static str, &'static str),
+
+        #[error("{name} = {name}")]
+        Repeated { name: &'static str },
+
+        #[error("{0:#x}")]
+        Hex(u32),
     }
 
-    fn cause_ip_error() -> std::result::Result<(), AddrParseError> {
-        "256.256.256.256".parse::<std::net::Ipv4Addr>().map(|_| ())
+    #[test]
+    fn display_format_specs() {
+        assert_eq!(FmtErr::Debug0("hi".into()).to_string(), "\"hi\"");
+        assert_eq!(FmtErr::Ordered("a", "b").to_string(), "a vs b");
+        assert_eq!(FmtErr::Swapped("a", "b").to_string(), "b then a");
+        assert_eq!(FmtErr::Repeated { name: "q" }.to_string(), "q = q");
+        assert_eq!(FmtErr::Hex(255).to_string(), "0xff");
     }
 
-    fn low_level_logic(trigger: u8) -> Result<()> {
-        if trigger == 1 {
-            cause_io_error()?;
-        } else if trigger == 2 {
-            cause_ip_error()?;
+    #[derive(Debug, Error)]
+    pub enum NoPlaceholder {
+        #[error("nothing to see")]
+        WithField(u64),
+
+        #[error("also nothing")]
+        WithNamed { _x: u8 },
+    }
+
+    #[test]
+    fn display_no_placeholder_with_fields() {
+        assert_eq!(NoPlaceholder::WithField(999).to_string(), "nothing to see");
+        assert_eq!(
+            NoPlaceholder::WithNamed { _x: 1 }.to_string(),
+            "also nothing"
+        );
+    }
+
+    #[derive(Debug, Error)]
+    pub enum FromTuple {
+        #[error("io: {}")]
+        #[from]
+        Io(IoError),
+
+        #[error("ip: {}")]
+        #[from]
+        Ip(AddrParseError),
+    }
+
+    #[test]
+    fn from_tuple_impls() {
+        let e: FromTuple = IoError::new(ErrorKind::Other, "x").into();
+        assert!(matches!(e, FromTuple::Io(_)));
+
+        let bad: AddrParseError = "nope".parse::<std::net::Ipv4Addr>().unwrap_err();
+        let e: FromTuple = bad.into();
+        assert!(matches!(e, FromTuple::Ip(_)));
+    }
+
+    #[derive(Debug, Error)]
+    pub enum FromNamedField {
+        #[error("io in {label}")]
+        Io {
+            label: &'static str,
+            #[from]
+            source: IoError,
+        },
+    }
+
+    #[test]
+    fn from_named_field() {
+        let e: FromNamedField = IoError::new(ErrorKind::Other, "x").into();
+        match &e {
+            FromNamedField::Io { label, .. } => assert_eq!(*label, "Io"),
+        }
+        assert_eq!(e.to_string(), "io in Io");
+    }
+
+    type R = std::result::Result<(), FromTuple>;
+
+    fn depth_io() -> std::result::Result<(), IoError> {
+        Err(IoError::new(ErrorKind::PermissionDenied, "denied"))
+    }
+
+    fn depth_ip() -> std::result::Result<(), AddrParseError> {
+        "256.0.0.0".parse::<std::net::Ipv4Addr>().map(|_| ())
+    }
+
+    fn layer(sel: u8) -> R {
+        match sel {
+            1 => depth_io()?,
+            2 => depth_ip()?,
+            _ => {}
         }
         Ok(())
     }
 
     #[test]
-    fn test_question_mark_operator() {
-        let res_io = low_level_logic(1);
-        assert!(res_io.is_err());
-        match res_io.unwrap_err() {
-            TestError::Io(e) => assert_eq!(e.kind(), ErrorKind::NotFound),
-            _ => panic!("Expected TestError::Io"),
+    fn question_mark_chain() {
+        let e = layer(1).unwrap_err();
+        match e {
+            FromTuple::Io(io) => assert_eq!(io.kind(), ErrorKind::PermissionDenied),
+            _ => panic!("expected Io"),
         }
 
-        let res_ip = low_level_logic(2);
-        assert!(res_ip.is_err());
-        assert!(matches!(res_ip.unwrap_err(), TestError::BadIp(_)));
+        let e = layer(2).unwrap_err();
+        assert!(matches!(e, FromTuple::Ip(_)));
+
+        assert!(layer(0).is_ok());
+    }
+
+    #[derive(Debug, Error)]
+    pub enum GenErr<T>
+    where
+        T: Debug,
+    {
+        #[error("generic: {0:?}")]
+        One(T),
+
+        #[error("both: {0:?} and {1:?}")]
+        Two(T, T),
     }
 
     #[test]
-    fn test_anyhow_compatibility() {
-        fn high_level_workflow() -> anyhow::Result<()> {
-            low_level_logic(1)?; 
+    fn generic_display() {
+        let e: GenErr<u32> = GenErr::One(42);
+        assert_eq!(e.to_string(), "generic: 42");
+
+        let e: GenErr<&str> = GenErr::Two("a", "b");
+        assert_eq!(e.to_string(), "both: \"a\" and \"b\"");
+    }
+
+    #[derive(Debug, Error)]
+    pub enum MultiGen<A, B>
+    where
+        A: Debug,
+        B: Debug,
+    {
+        #[error("a={0:?}")]
+        A(A),
+        #[error("b={0:?}")]
+        B(B),
+    }
+
+    #[test]
+    fn multi_generic_display() {
+        let e: MultiGen<u8, &str> = MultiGen::A(1);
+        assert_eq!(e.to_string(), "a=1");
+        let e: MultiGen<u8, &str> = MultiGen::B("x");
+        assert_eq!(e.to_string(), "b=\"x\"");
+    }
+
+    #[derive(Debug, Error)]
+    pub enum ConstErr<const N: usize> {
+        #[error("capacity {N}")]
+        Cap,
+    }
+
+    #[test]
+    fn const_generic_display() {
+        let e: ConstErr<8> = ConstErr::Cap;
+        assert_eq!(e.to_string(), "capacity 8");
+    }
+
+    #[test]
+    fn traits_are_implemented() {
+        fn assert_display<T: std::fmt::Display>() {}
+        fn assert_debug<T: Debug>() {}
+        fn assert_error<T: StdError>() {}
+
+        assert_display::<ShapeErr>();
+        assert_debug::<ShapeErr>();
+        assert_error::<ShapeErr>();
+    }
+
+    #[test]
+    fn source_is_none() {
+        assert!(ShapeErr::Bare.source().is_none());
+        assert!(ShapeErr::Port(1).source().is_none());
+    }
+
+    #[test]
+    fn boxed_dyn_error() {
+        let e: Box<dyn StdError + Send + Sync + 'static> =
+            Box::new(ShapeErr::Message);
+        assert_eq!(e.to_string(), "explicit message");
+    }
+
+    #[test]
+    fn anyhow_compat() {
+        fn workflow() -> anyhow::Result<()> {
+            depth_io().map_err(FromTuple::from)?;
             Ok(())
         }
-
-        let res = high_level_workflow();
-        assert!(res.is_err());
-        
-        let anyhow_err = res.unwrap_err();
-        assert_eq!(anyhow_err.to_string(), "Disk err: file not found");
+        let err = workflow().unwrap_err();
+        assert_eq!(err.to_string(), "io: denied");
     }
 
     #[test]
-    fn test_zero_cost_size() {
-        let size = std::mem::size_of::<TestError>();
-        println!("Stack size: {} byte", size);
-        assert!(size <= 24, "Err too large");
+    fn nested_in_format() {
+        let s = format!("[{}]", ShapeErr::Port(80));
+        assert_eq!(s, "[port=80]");
+    }
+
+    #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+    pub enum CopyErr {
+        #[error("a")]
+        A,
+        #[error("b")]
+        B,
+    }
+
+    #[test]
+    fn user_derives_survive() {
+        let a = CopyErr::A;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(a, CopyErr::B);
+    }
+
+    #[derive(Debug, Error)]
+    pub enum ManyVariants {
+        #[error("v0")]  V0,
+        #[error("v1")]  V1,
+        #[error("v2")]  V2,
+        #[error("v3")]  V3,
+        #[error("v4")]  V4,
+        #[error("v5")]  V5,
+        #[error("v6")]  V6,
+        #[error("v7")]  V7,
+        #[error("v8")]  V8,
+        #[error("v9")]  V9,
+    }
+
+    #[test]
+    fn many_variants_compile_and_display() {
+        assert_eq!(ManyVariants::V0.to_string(), "v0");
+        assert_eq!(ManyVariants::V9.to_string(), "v9");
+    }
+
+    #[test]
+    fn size_is_reasonable() {
+        let sz = std::mem::size_of::<ShapeErr>();
+        println!("ShapeErr size: {sz}");
+        assert!(sz <= 32, "ShapeErr too large: {sz}");
+    }
+
+    #[derive(Debug, Error)]
+    pub enum Layered {
+        #[error("io: {}")]
+        #[from]
+        Io(IoError),
+
+        #[error("ip: {}")]
+        #[from]
+        Ip(AddrParseError),
+    }
+
+    fn inner(sel: u8) -> std::result::Result<(), IoError> {
+        if sel == 0 {
+            Ok(())
+        } else {
+            Err(IoError::new(ErrorKind::Other, "boom"))
+        }
+    }
+
+    fn mid(sel: u8) -> std::result::Result<(), Layered> {
+        inner(sel)?;
+        Ok(())
+    }
+
+    #[test]
+    fn layered_question_mark() {
+        assert!(mid(0).is_ok());
+        let e = mid(1).unwrap_err();
+        assert_eq!(e.to_string(), "io: boom");
     }
 }
 

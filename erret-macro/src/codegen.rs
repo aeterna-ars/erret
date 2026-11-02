@@ -5,11 +5,30 @@ pub fn generate_code(en: Enum) -> TokenStream {
     if en.name.is_empty() {
         return compile_error("#[derive(Error)] can only be applied to enums");
     }
-    if en.has_generics {
-        return compile_error("#[derive(Error)] does not support generic enums");
-    }
 
     let enum_name = &en.name;
+
+    let ig_debug = if en.impl_generics_debug.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", en.impl_generics_debug)
+    };
+    let ig_plain = if en.impl_generics_plain.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", en.impl_generics_plain)
+    };
+    let tg = if en.type_generics.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", en.type_generics)
+    };
+    let wc = if en.where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", en.where_clause)
+    };
+
     let mut display_arms: Vec<String> = Vec::new();
     let mut from_impls: Vec<String> = Vec::new();
 
@@ -18,7 +37,7 @@ pub fn generate_code(en: Enum) -> TokenStream {
         let fmt_str = var.error_arg.as_deref().unwrap_or(var_name.as_str());
         let has_placeholder = fmt_str.contains('{');
 
-        let (pattern, write_args) = build_pattern(enum_name, var, has_placeholder);
+        let (pattern, write_args) = build_pattern(enum_name, var, has_placeholder, fmt_str);
 
         if write_args.is_empty() {
             display_arms.push(format!("{} => write!(f, \"{}\"),", pattern, fmt_str));
@@ -37,23 +56,25 @@ pub fn generate_code(en: Enum) -> TokenStream {
                 if non_from.len() != 1 {
                     return compile_error(&format!(
                         "variant `{}` with #[from] must have exactly one non-from field, found {}",
-                        var_name,
-                        non_from.len()
+                        var_name, non_from.len()
                     ));
                 }
                 let static_field = non_from[0];
                 let static_field_name = static_field.name.as_ref().unwrap();
                 from_impls.push(format!(
-                    "impl core::convert::From<{ty}> for {enum_name} {{
+                    "impl{ig_plain} core::convert::From<{ty}> for {name}{tg}{wc} {{
                         fn from(err: {ty}) -> Self {{
-                            {enum_name}::{var_name} {{
+                            {name}::{var_name} {{
                                 {static_field_name}: \"{var_name}\",
                                 {from_field_name}: err,
                             }}
                         }}
                     }}",
+                    ig_plain = ig_plain,
                     ty = ty,
-                    enum_name = enum_name,
+                    name = enum_name,
+                    tg = tg,
+                    wc = wc,
                     var_name = var_name,
                     static_field_name = static_field_name,
                     from_field_name = from_field_name
@@ -62,18 +83,20 @@ pub fn generate_code(en: Enum) -> TokenStream {
                 if var.fields.len() != 1 {
                     return compile_error(&format!(
                         "tuple variant `{}` with #[from] must have exactly one field, found {}",
-                        var_name,
-                        var.fields.len()
+                        var_name, var.fields.len()
                     ));
                 }
                 from_impls.push(format!(
-                    "impl core::convert::From<{ty}> for {enum_name} {{
+                    "impl{ig_plain} core::convert::From<{ty}> for {name}{tg}{wc} {{
                         fn from(err: {ty}) -> Self {{
-                            {enum_name}::{var_name}(err)
+                            {name}::{var_name}(err)
                         }}
                     }}",
+                    ig_plain = ig_plain,
                     ty = ty,
-                    enum_name = enum_name,
+                    name = enum_name,
+                    tg = tg,
+                    wc = wc,
                     var_name = var_name
                 ));
             }
@@ -84,26 +107,34 @@ pub fn generate_code(en: Enum) -> TokenStream {
     let from_impls_str = from_impls.join("\n");
 
     format!(
-        "impl core::fmt::Display for {enum_name} {{
+        "impl{ig_debug} core::fmt::Display for {name}{tg}{wc} {{
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{
                 match self {{
-                    {display_arms}
+                    {arms}
                 }}
             }}
         }}
 
-        impl core::error::Error for {enum_name} {{}}
+        impl{ig_debug} core::error::Error for {name}{tg}{wc} {{}}
 
-        {from_impls}",
-        enum_name = enum_name,
-        display_arms = display_arms_str,
-        from_impls = from_impls_str
+        {froms}",
+        ig_debug = ig_debug,
+        name = enum_name,
+        tg = tg,
+        wc = wc,
+        arms = display_arms_str,
+        froms = from_impls_str
     )
     .parse()
     .unwrap()
 }
 
-fn build_pattern(enum_name: &str, var: &crate::Var, has_placeholder: bool) -> (String, String) {
+fn build_pattern(
+    enum_name: &str,
+    var: &crate::Var,
+    has_placeholder: bool,
+    fmt_str: &str,
+) -> (String, String) {
     let var_name = &var.name;
 
     if var.fields.is_empty() {
@@ -114,10 +145,7 @@ fn build_pattern(enum_name: &str, var: &crate::Var, has_placeholder: bool) -> (S
 
     if !has_placeholder {
         if is_struct {
-            return (
-                format!("{}::{} {{ .. }}", enum_name, var_name),
-                String::new(),
-            );
+            return (format!("{}::{} {{ .. }}", enum_name, var_name), String::new());
         } else {
             return (format!("{}::{}(..)", enum_name, var_name), String::new());
         }
@@ -125,17 +153,21 @@ fn build_pattern(enum_name: &str, var: &crate::Var, has_placeholder: bool) -> (S
 
     if is_struct {
         let mut pat = String::new();
-        let mut args = String::new();
         for (i, field) in var.fields.iter().enumerate() {
             let f_name = field.name.as_ref().unwrap();
             if i > 0 {
                 pat.push_str(", ");
-                args.push_str(", ");
             }
-            pat.push_str(f_name);
-            args.push_str(&format!("{} = {}", f_name, f_name));
+            if fmt_uses_field(fmt_str, f_name) {
+                pat.push_str(f_name);
+            } else {
+                pat.push_str(&format!("{}: _{}", f_name, f_name));
+            }
         }
-        (format!("{}::{} {{ {} }}", enum_name, var_name, pat), args)
+        (
+            format!("{}::{} {{ {} }}", enum_name, var_name, pat),
+            String::new(),
+        )
     } else {
         let mut pat = String::new();
         let mut args = String::new();
@@ -149,6 +181,24 @@ fn build_pattern(enum_name: &str, var: &crate::Var, has_placeholder: bool) -> (S
         }
         (format!("{}::{}({})", enum_name, var_name, pat), args)
     }
+}
+
+fn fmt_uses_field(fmt: &str, name: &str) -> bool {
+    let mut s = fmt;
+    while let Some(pos) = s.find('{') {
+        s = &s[pos + 1..];
+        if s.starts_with('{') {
+            s = &s[1..];
+            continue;
+        }
+        if s.starts_with(name) {
+            let rest = &s[name.len()..];
+            if rest.starts_with('}') || rest.starts_with(':') {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn compile_error(msg: &str) -> TokenStream {
